@@ -120,16 +120,19 @@ public class DbAction extends ActionSupport {
 
     public static final String REGEX_429 = "\"statusCode\"\\s*:\\s*429";
     public static final String REGEX_5XX = "\"statusCode\"\\s*:\\s*5[0-9][0-9]";
-    public static final String REGEX_CLOUDFLARE = "(error\\s*1[0-9]{3}|error\\s*10[0-9]{3}|" +
-            "access\\s*denied|rate\\s*limited|" +
-            "attention\\s*required|blocked|" +
-            "security\\s*service|" +
-            "waf\\s*(block|rule|trigger|protection)|" +
-            "modsecurity|firewall\\s*rule|" +
-            "ray\\s*id.*blocked|" +
-            "checking\\s*your\\s*browser|" +
-            "ddos\\s*protection|" +
-            "sorry.*you\\s*have\\s*been\\s*blocked)";
+    public static final String REGEX_CLOUDFLARE = "(error\\s*1[0-9]{3}|error\\s*10[0-9]{3}|" + // CF-specific error
+                                                                                               // codes
+            "attention\\s*required.*cloudflare|" + // Challenge page identifier
+            "under\\s*attack.*cloudflare|cloudflare.*under\\s*attack|" + // Under attack mode
+            "ddos\\s*protection.*cloudflare|cloudflare.*ddos|" + // DDoS protection
+            "(blocked|denied|limited|restricted).*cloudflare|" + // Generic blocking with CF context
+            "cloudflare.*(blocked|denied|limited|restricted|security)|" + // CF context with blocking
+            "waf.*cloudflare|cloudflare.*waf|" + // WAF by Cloudflare
+            "rate.*limit.*cloudflare|cloudflare.*rate.*limit|" + // Rate limiting by CF
+            "checking.*browser.*cloudflare|" + // Browser check challenge
+            "security.*check.*cloudflare|" + // Security challenges
+            "managed.*challenge.*cloudflare|" + // Managed challenge
+            "ray\\s*id.*blocked)"; // Ray ID when blocked
 
     public List<BulkUpdates> getWritesForTestingRunIssues() {
         return writesForTestingRunIssues;
@@ -1968,7 +1971,18 @@ public class DbAction extends ActionSupport {
                             if (last instanceof TestResult) {
                                 message = ((TestResult) last).getMessage();
                             } else if (last instanceof MultiExecTestResult) {
-                                message = ((MultiExecTestResult) last).getMessage();
+                                MultiExecTestResult multiResult = (MultiExecTestResult) last;
+                                Map<String, WorkflowTestResult.NodeResult> nodeResultMap = multiResult
+                                        .getNodeResultMap();
+                                List<String> executionOrder = multiResult.getExecutionOrder();
+                                if (nodeResultMap != null && !executionOrder.isEmpty()) {
+                                    // Get the message from the last executed node
+                                    String lastNodeId = executionOrder.get(executionOrder.size() - 1);
+                                    WorkflowTestResult.NodeResult lastNodeResult = nodeResultMap.get(lastNodeId);
+                                    if (lastNodeResult != null) {
+                                        message = lastNodeResult.getMessage();
+                                    }
+                                }
                             }
                         } catch (Exception ig) {
                         }
