@@ -54,9 +54,11 @@ public class TestingRunResult implements Comparable<TestingRunResult> {
     @BsonIgnore
     private List<MultiExecTestResult> multiExecTestResults;
 
-
     public static final String ERRORS_LIST = "errorsList";
-    private  List<String> errorsList;
+    private List<String> errorsList;
+
+    public static final String API_ERRORS = "apiErrors";
+    private Map<String, Integer> apiErrors;
 
     public static final String REQUIRES_CONFIG = TEST_RESULTS + ".0." + TestResult.REQUIRES_CONFIG;
 
@@ -114,12 +116,13 @@ public class TestingRunResult implements Comparable<TestingRunResult> {
         ERROR, INFO,
     }
 
-    public TestingRunResult() { }
+    public TestingRunResult() {
+    }
 
     public TestingRunResult(ObjectId testRunId, ApiInfo.ApiInfoKey apiInfoKey, String testSuperType, String testSubType,
-                            List<GenericTestResult> testResults, boolean vulnerable, List<SingleTypeInfo> singleTypeInfos,
-                            int confidencePercentage, int startTimestamp, int endTimestamp, ObjectId testRunResultSummaryId, 
-                            WorkflowTest workflowTest, List<TestLog> testLogs) {
+            List<GenericTestResult> testResults, boolean vulnerable, List<SingleTypeInfo> singleTypeInfos,
+            int confidencePercentage, int startTimestamp, int endTimestamp, ObjectId testRunResultSummaryId,
+            WorkflowTest workflowTest, List<TestLog> testLogs) {
         this.testRunId = testRunId;
         this.apiInfoKey = apiInfoKey;
         this.testSuperType = testSuperType;
@@ -159,9 +162,9 @@ public class TestingRunResult implements Comparable<TestingRunResult> {
         this.testRunId = testRunId;
     }
 
-
     public String getHexId() {
-        if (hexId == null) return this.id.toHexString();
+        if (hexId == null)
+            return this.id.toHexString();
         return this.hexId;
     }
 
@@ -261,7 +264,8 @@ public class TestingRunResult implements Comparable<TestingRunResult> {
     }
 
     public String getTestRunResultSummaryHexId() {
-        if (testRunResultSummaryHexId == null) return this.testRunResultSummaryId.toHexString();
+        if (testRunResultSummaryHexId == null)
+            return this.testRunResultSummaryId.toHexString();
         return this.testRunResultSummaryHexId;
     }
 
@@ -287,35 +291,39 @@ public class TestingRunResult implements Comparable<TestingRunResult> {
 
     public String toConsoleString(String severity) {
 
-        return 
-         ColorConstants.BLUE + "API: " + apiInfoKey.getUrl() + " " + apiInfoKey.getMethod().toString() + "\n" +
-         ColorConstants.PURPLE + "Test: " + testSuperType + " " + testSubType + " " +
-         (vulnerable ? ColorConstants.RED : ColorConstants.GREEN) + "Vulnerable: " + vulnerable + 
-         (vulnerable ? ColorConstants.CYAN + " Severity : " + severity : "") + 
-         "\n" + ColorConstants.RESET;
+        return ColorConstants.BLUE + "API: " + apiInfoKey.getUrl() + " " + apiInfoKey.getMethod().toString() + "\n" +
+                ColorConstants.PURPLE + "Test: " + testSuperType + " " + testSubType + " " +
+                (vulnerable ? ColorConstants.RED : ColorConstants.GREEN) + "Vulnerable: " + vulnerable +
+                (vulnerable ? ColorConstants.CYAN + " Severity : " + severity : "") +
+                "\n" + ColorConstants.RESET;
     }
 
-    public String toOutputString(String severity){
+    public String toOutputString(String severity) {
         StringBuilder bld = new StringBuilder();
 
         bld.append("API: " + apiInfoKey.getUrl() + " " + apiInfoKey.getMethod().toString() + "\n");
         bld.append("Test: " + testSuperType + " " + testSubType + " Vulnerable: " + vulnerable +
-        (vulnerable ? " Severity : " + severity : "") + "\n");
+                (vulnerable ? " Severity : " + severity : "") + "\n");
         for (GenericTestResult tr : testResults) {
             if (tr instanceof MultiExecTestResult) {
                 continue;
             }
             TestResult testResult = (TestResult) tr;
             Gson gson = new Gson();
-            Map<String, Object> json = gson.fromJson(testResult.getOriginalMessage(), new TypeToken<Map<String, Object>>(){}.getType());
+            Map<String, Object> json = gson.fromJson(testResult.getOriginalMessage(),
+                    new TypeToken<Map<String, Object>>() {
+                    }.getType());
             try {
-                bld.append("Original request : " + json.get("requestHeaders") + "\n" + json.get("requestPayload") + "\n");
-                bld.append("Original response: " + json.get("responseHeaders") + "\n" + json.get("responsePayload") + "\n");
-            } catch (Exception e){
+                bld.append(
+                        "Original request : " + json.get("requestHeaders") + "\n" + json.get("requestPayload") + "\n");
+                bld.append("Original response: " + json.get("responseHeaders") + "\n" + json.get("responsePayload")
+                        + "\n");
+            } catch (Exception e) {
                 bld.append("Original data not found\n");
             }
             try {
-                json = gson.fromJson(testResult.getMessage(), new TypeToken<Map<String, Object>>(){}.getType());
+                json = gson.fromJson(testResult.getMessage(), new TypeToken<Map<String, Object>>() {
+                }.getType());
                 bld.append("\nAttempted request : " + json.get("request") + "\n");
                 bld.append("\nAttempted response: " + json.get("response") + "\n");
             } catch (Exception e) {
@@ -375,12 +383,21 @@ public class TestingRunResult implements Comparable<TestingRunResult> {
     public void setSingleTestResults(List<TestResult> singleTestResults) {
         this.singleTestResults = singleTestResults;
     }
+
     public List<MultiExecTestResult> getMultiExecTestResults() {
         return multiExecTestResults;
     }
 
     public void setMultiExecTestResults(List<MultiExecTestResult> multiExecTestResults) {
         this.multiExecTestResults = multiExecTestResults;
+    }
+
+    public Map<String, Integer> getApiErrors() {
+        return apiErrors;
+    }
+
+    public void setApiErrors(Map<String, Integer> apiErrors) {
+        this.apiErrors = apiErrors;
     }
 
 }

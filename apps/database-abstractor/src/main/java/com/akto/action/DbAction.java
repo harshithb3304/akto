@@ -77,6 +77,7 @@ import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 public class DbAction extends ActionSupport {
     static final ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor();
@@ -109,12 +110,26 @@ public class DbAction extends ActionSupport {
     List<DependencyNode> dependencyNodeList;
     TestScript testScript;
     String openApiSchema;
-    @Getter @Setter
+    @Getter
+    @Setter
     McpAuditInfo auditInfo;
 
     private ModuleInfo moduleInfo;
 
     private static final LoggerMaker loggerMaker = new LoggerMaker(DbAction.class, LogDb.DB_ABS);
+
+    public static final String REGEX_429 = "\"statusCode\"\\s*:\\s*429";
+    public static final String REGEX_5XX = "\"statusCode\"\\s*:\\s*5[0-9][0-9]";
+    public static final String REGEX_CLOUDFLARE = "(error\\s*1[0-9]{3}|error\\s*10[0-9]{3}|" +
+            "access\\s*denied|rate\\s*limited|" +
+            "attention\\s*required|blocked|" +
+            "security\\s*service|" +
+            "waf\\s*(block|rule|trigger|protection)|" +
+            "modsecurity|firewall\\s*rule|" +
+            "ray\\s*id.*blocked|" +
+            "checking\\s*your\\s*browser|" +
+            "ddos\\s*protection|" +
+            "sorry.*you\\s*have\\s*been\\s*blocked)";
 
     public List<BulkUpdates> getWritesForTestingRunIssues() {
         return writesForTestingRunIssues;
@@ -258,7 +273,9 @@ public class DbAction extends ActionSupport {
     private String testingRunPlaygroundId;
 
     private static final Gson gson = new Gson();
-    ObjectMapper objectMapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false).configure(DeserializationFeature.FAIL_ON_INVALID_SUBTYPE, false).configure(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES, false);
+    ObjectMapper objectMapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .configure(DeserializationFeature.FAIL_ON_INVALID_SUBTYPE, false)
+            .configure(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES, false);
     KafkaUtils kafkaUtils = new KafkaUtils();
     String endpointLogicalGroupId;
     String vpcId;
@@ -324,7 +341,7 @@ public class DbAction extends ActionSupport {
         try {
             List<CustomDataType> data = DbLayer.fetchCustomDataTypes();
             List<CustomDataTypeMapper> customDataTypeMappers = new ArrayList<>();
-            for (CustomDataType customDataType: data) {
+            for (CustomDataType customDataType : data) {
                 customDataTypeMappers.add(new CustomDataTypeMapper(customDataType));
             }
             customDataTypes = customDataTypeMappers;
@@ -349,7 +366,7 @@ public class DbAction extends ActionSupport {
         try {
             List<CustomAuthType> data = DbLayer.fetchCustomAuthTypes();
             List<CustomAuthTypeMapper> customAuthTypeMappers = new ArrayList<>();
-            for (CustomAuthType customAuthType: data) {
+            for (CustomAuthType customAuthType : data) {
                 customAuthTypeMappers.add(new CustomAuthTypeMapper(customAuthType));
             }
             customAuthTypes = customAuthTypeMappers;
@@ -424,8 +441,8 @@ public class DbAction extends ActionSupport {
         return Action.SUCCESS.toUpperCase();
     }
 
-
     TrafficCollectorMetrics trafficCollectorMetrics = null;
+
     public String updateTrafficCollectorMetrics() {
         if (trafficCollectorMetrics == null) {
             loggerMaker.errorAndAddToDb("trafficCollectorMetrics is null");
@@ -434,7 +451,8 @@ public class DbAction extends ActionSupport {
 
         // update heartbeat
         try {
-            TrafficCollectorInfoDao.instance.updateHeartbeat(trafficCollectorMetrics.getId(), trafficCollectorMetrics.getRuntimeId());
+            TrafficCollectorInfoDao.instance.updateHeartbeat(trafficCollectorMetrics.getId(),
+                    trafficCollectorMetrics.getRuntimeId());
         } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "Error while updating heartbeat: " + e);
         }
@@ -453,21 +471,25 @@ public class DbAction extends ActionSupport {
         int accountId = Context.accountId.get();
         try {
             List<ApiInfo> apiInfos = new ArrayList<>();
-            for (BasicDBObject obj: apiInfoList) {
+            for (BasicDBObject obj : apiInfoList) {
                 ApiInfo apiInfo = objectMapper.readValue(obj.toJson(), ApiInfo.class);
                 ApiInfoKey id = apiInfo.getId();
                 if (UsageMetricCalculator.getDeactivated().contains(id.getApiCollectionId())) {
                     continue;
                 }
-                if (URLMethods.Method.OPTIONS.equals(id.getMethod()) || URLMethods.Method.OTHER.equals(id.getMethod())) {
+                if (URLMethods.Method.OPTIONS.equals(id.getMethod())
+                        || URLMethods.Method.OTHER.equals(id.getMethod())) {
                     continue;
                 }
-                if (accountId == 1721887185 && (id.getApiCollectionId() == 1991121043 || id.getApiCollectionId() == -1134993740)  && !id.getMethod().equals(Method.OPTIONS))  {
-                    loggerMaker.infoAndAddToDb("auth types for endpoint from runtime " + id.getUrl() + " " + id.getMethod() + " : " + apiInfo.getAllAuthTypesFound());
+                if (accountId == 1721887185
+                        && (id.getApiCollectionId() == 1991121043 || id.getApiCollectionId() == -1134993740)
+                        && !id.getMethod().equals(Method.OPTIONS)) {
+                    loggerMaker.infoAndAddToDb("auth types for endpoint from runtime " + id.getUrl() + " "
+                            + id.getMethod() + " : " + apiInfo.getAllAuthTypesFound());
                 }
                 apiInfos.add(apiInfo);
             }
-            if (apiInfos!=null && !apiInfos.isEmpty()) {
+            if (apiInfos != null && !apiInfos.isEmpty()) {
                 SingleTypeInfo.fetchCustomAuthTypes(accountId);
                 service.schedule(new Runnable() {
                     public void run() {
@@ -505,60 +527,60 @@ public class DbAction extends ActionSupport {
         if (kafkaUtils.isWriteEnabled()) {
 
             try {
-                    Set<Integer> indicesToDelete = new HashSet<>();
-                    int i = 0;
-                    for (BulkUpdates bulkUpdate : writesForSti) {
-                        boolean ignore = false;
-                        int apiCollectionId = -1;
-                        String url = null, method = null, param = null;
-                        for (Map.Entry<String, Object> entry : bulkUpdate.getFilters().entrySet()) {
-                            if (entry.getKey().equalsIgnoreCase(SingleTypeInfo._API_COLLECTION_ID)) {
-                                String valStr = entry.getValue().toString();
-                                int val = Integer.valueOf(valStr);
-                                apiCollectionId = val;
-                                if (ignoreHosts.contains(val)) {
-                                    ignore = true;
-                                }
-                                if(UsageMetricCalculator.getDeactivated().contains(apiCollectionId)){
-                                    ignore = true;
-                                }
-                            } else if(entry.getKey().equalsIgnoreCase(SingleTypeInfo._URL)){
-                                url = entry.getValue().toString();
-                            } else if(entry.getKey().equalsIgnoreCase(SingleTypeInfo._METHOD)){
-                                method = entry.getValue().toString();
-                                if ("OPTIONS".equals(method) || "CONNECT".equals(method)) {
-                                    ignore = true;
-                                }
-                            } else if(entry.getKey().equalsIgnoreCase(SingleTypeInfo._PARAM)){
-                                param = entry.getValue().toString();
-                            }
-                        }
-                        if (!ignore && apiCollectionId != -1 && url != null && method != null && param!=null) {
-                            boolean isNew = ParamFilter.isNewEntry(accId, apiCollectionId, url, method, param);
-                            if (!isNew) {
+                Set<Integer> indicesToDelete = new HashSet<>();
+                int i = 0;
+                for (BulkUpdates bulkUpdate : writesForSti) {
+                    boolean ignore = false;
+                    int apiCollectionId = -1;
+                    String url = null, method = null, param = null;
+                    for (Map.Entry<String, Object> entry : bulkUpdate.getFilters().entrySet()) {
+                        if (entry.getKey().equalsIgnoreCase(SingleTypeInfo._API_COLLECTION_ID)) {
+                            String valStr = entry.getValue().toString();
+                            int val = Integer.valueOf(valStr);
+                            apiCollectionId = val;
+                            if (ignoreHosts.contains(val)) {
                                 ignore = true;
                             }
-                        }
-                        if(ignore){
-                            indicesToDelete.add(i);
-                        }
-                        i++;
-                    }
-
-                    if (writesForSti != null && !writesForSti.isEmpty() &&
-                            indicesToDelete != null && !indicesToDelete.isEmpty()) {
-                        int size = writesForSti.size();
-                        List<BulkUpdates> tempWrites = new ArrayList<>();
-                        for (int index = 0; index < size; index++) {
-                            if (indicesToDelete.contains(index)) {
-                                continue;
+                            if (UsageMetricCalculator.getDeactivated().contains(apiCollectionId)) {
+                                ignore = true;
                             }
-                            tempWrites.add(writesForSti.get(index));
+                        } else if (entry.getKey().equalsIgnoreCase(SingleTypeInfo._URL)) {
+                            url = entry.getValue().toString();
+                        } else if (entry.getKey().equalsIgnoreCase(SingleTypeInfo._METHOD)) {
+                            method = entry.getValue().toString();
+                            if ("OPTIONS".equals(method) || "CONNECT".equals(method)) {
+                                ignore = true;
+                            }
+                        } else if (entry.getKey().equalsIgnoreCase(SingleTypeInfo._PARAM)) {
+                            param = entry.getValue().toString();
                         }
-                        writesForSti = tempWrites;
-                        int newSize = writesForSti.size();
-                        loggerMaker.infoAndAddToDb(String.format("Original writes: %d Final writes: %d", size, newSize));
                     }
+                    if (!ignore && apiCollectionId != -1 && url != null && method != null && param != null) {
+                        boolean isNew = ParamFilter.isNewEntry(accId, apiCollectionId, url, method, param);
+                        if (!isNew) {
+                            ignore = true;
+                        }
+                    }
+                    if (ignore) {
+                        indicesToDelete.add(i);
+                    }
+                    i++;
+                }
+
+                if (writesForSti != null && !writesForSti.isEmpty() &&
+                        indicesToDelete != null && !indicesToDelete.isEmpty()) {
+                    int size = writesForSti.size();
+                    List<BulkUpdates> tempWrites = new ArrayList<>();
+                    for (int index = 0; index < size; index++) {
+                        if (indicesToDelete.contains(index)) {
+                            continue;
+                        }
+                        tempWrites.add(writesForSti.get(index));
+                    }
+                    writesForSti = tempWrites;
+                    int newSize = writesForSti.size();
+                    loggerMaker.infoAndAddToDb(String.format("Original writes: %d Final writes: %d", size, newSize));
+                }
             } catch (Exception e) {
                 loggerMaker.errorAndAddToDb(e, "error in ignore STI updates " + e.toString());
                 e.printStackTrace();
@@ -572,8 +594,8 @@ public class DbAction extends ActionSupport {
             loggerMaker.infoAndAddToDb("Entering writes size: " + writesForSti.size());
             try {
                 ArrayList<WriteModel<SingleTypeInfo>> writes = new ArrayList<>();
-                int ignoreCount =0;
-                for (BulkUpdates bulkUpdate: writesForSti) {
+                int ignoreCount = 0;
+                for (BulkUpdates bulkUpdate : writesForSti) {
                     List<Bson> filters = new ArrayList<>();
                     boolean ignore = false;
                     for (Map.Entry<String, Object> entry : bulkUpdate.getFilters().entrySet()) {
@@ -608,10 +630,10 @@ public class DbAction extends ActionSupport {
                     }
                     filters.add(Filters.in("isUrlParam", urlParamQuery));
                     List<String> updatePayloadList = bulkUpdate.getUpdates();
-    
+
                     List<Bson> updates = new ArrayList<>();
                     boolean isDeleteWrite = false;
-                    for (String payload: updatePayloadList) {
+                    for (String payload : updatePayloadList) {
                         Map<String, Object> json = gson.fromJson(payload, Map.class);
                         String operation = (String) json.get("op");
                         if (operation.equalsIgnoreCase("delete")) {
@@ -637,16 +659,16 @@ public class DbAction extends ActionSupport {
 
                     if (isDeleteWrite) {
                         writes.add(
-                                new DeleteOneModel<>(Filters.and(filters), new DeleteOptions())
-                        );
+                                new DeleteOneModel<>(Filters.and(filters), new DeleteOptions()));
                     } else {
                         writes.add(
-                                new UpdateOneModel<>(Filters.and(filters), Updates.combine(updates), new UpdateOptions().upsert(true))
-                        );
+                                new UpdateOneModel<>(Filters.and(filters), Updates.combine(updates),
+                                        new UpdateOptions().upsert(true)));
                     }
                 }
 
-                loggerMaker.infoAndAddToDb(String.format("Consumer data: %d ignored: %d writes: %d", writesForSti.size(), ignoreCount, writes.size()));
+                loggerMaker.infoAndAddToDb(String.format("Consumer data: %d ignored: %d writes: %d",
+                        writesForSti.size(), ignoreCount, writes.size()));
 
                 if (writes != null && !writes.isEmpty()) {
                     DbLayer.bulkWriteSingleTypeInfo(writes);
@@ -667,12 +689,12 @@ public class DbAction extends ActionSupport {
             try {
                 loggerMaker.infoAndAddToDb("bulkWriteSampleData called");
                 ArrayList<WriteModel<SampleData>> writes = new ArrayList<>();
-                for (BulkUpdates bulkUpdate: writesForSampleData) {
+                for (BulkUpdates bulkUpdate : writesForSampleData) {
                     Map<String, Object> mObj = (Map) bulkUpdate.getFilters().get("_id");
                     String apiCollectionIdStr = mObj.get("apiCollectionId").toString();
                     int apiCollectionId = Integer.valueOf(apiCollectionIdStr);
 
-                    if(UsageMetricCalculator.getDeactivated().contains(apiCollectionId)){
+                    if (UsageMetricCalculator.getDeactivated().contains(apiCollectionId)) {
                         continue;
                     }
 
@@ -702,7 +724,7 @@ public class DbAction extends ActionSupport {
                     SampleDataLogs.printLog(apiCollectionId, method, url);
 
                     List<Bson> updates = new ArrayList<>();
-                    for (String payload: updatePayloadList) {
+                    for (String payload : updatePayloadList) {
                         Map<String, Object> json = gson.fromJson(payload, Map.class);
                         String field = (String) json.get("field");
                         UpdatePayload updatePayload;
@@ -713,23 +735,24 @@ public class DbAction extends ActionSupport {
                                 val.add(dVal.get(i).intValue());
                             }
                             updates.add(Updates.setOnInsert(field, val));
-                        } else if(field.equals(SampleData.SAMPLES)){
+                        } else if (field.equals(SampleData.SAMPLES)) {
                             List<String> dVal = (List) json.get("val");
                             RedactAlert.submitSampleDataForChecking(dVal, apiCollectionId, method, url);
                             SampleDataLogs.insertCount(apiCollectionId, method, url, dVal.size());
-                            updatePayload = new UpdatePayload((String) json.get("field"), dVal , (String) json.get("op"));
+                            updatePayload = new UpdatePayload((String) json.get("field"), dVal,
+                                    (String) json.get("op"));
                             updates.add(Updates.pushEach(updatePayload.getField(), dVal, new PushOptions().slice(-10)));
                         } else {
                             List<String> dVal = (List) json.get("val");
-                            updatePayload = new UpdatePayload((String) json.get("field"), dVal , (String) json.get("op"));
+                            updatePayload = new UpdatePayload((String) json.get("field"), dVal,
+                                    (String) json.get("op"));
                             updates.add(Updates.pushEach(updatePayload.getField(), dVal, new PushOptions().slice(-10)));
                         }
                     }
                     writes.add(
-                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true))
-                    );
+                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true)));
                 }
-                if(writes!=null && !writes.isEmpty()){
+                if (writes != null && !writes.isEmpty()) {
                     DbLayer.bulkWriteSampleData(writes);
                 }
             } catch (Exception e) {
@@ -749,21 +772,21 @@ public class DbAction extends ActionSupport {
             try {
                 loggerMaker.infoAndAddToDb("bulkWriteSensitiveSampleData called");
                 ArrayList<WriteModel<SensitiveSampleData>> writes = new ArrayList<>();
-                for (BulkUpdates bulkUpdate: writesForSensitiveSampleData) {
+                for (BulkUpdates bulkUpdate : writesForSensitiveSampleData) {
                     Bson filters = Filters.empty();
                     int apiCollectionId = 0;
                     boolean ignore = false;
                     for (Map.Entry<String, Object> entry : bulkUpdate.getFilters().entrySet()) {
-                        if (entry.getKey().equalsIgnoreCase("_id.apiCollectionId") ) {
+                        if (entry.getKey().equalsIgnoreCase("_id.apiCollectionId")) {
                             String valStr = entry.getValue().toString();
                             int val = Integer.valueOf(valStr);
                             apiCollectionId = val;
-                            if(UsageMetricCalculator.getDeactivated().contains(apiCollectionId)){
+                            if (UsageMetricCalculator.getDeactivated().contains(apiCollectionId)) {
                                 ignore = true;
                                 break;
                             }
                             filters = Filters.and(filters, Filters.eq(entry.getKey(), val));
-                        } else if(entry.getKey().equalsIgnoreCase("_id.responseCode")) {
+                        } else if (entry.getKey().equalsIgnoreCase("_id.responseCode")) {
                             String valStr = entry.getValue().toString();
                             int val = Integer.valueOf(valStr);
                             filters = Filters.and(filters, Filters.eq(entry.getKey(), val));
@@ -777,21 +800,21 @@ public class DbAction extends ActionSupport {
                                     ignore = true;
                                     break;
                                 }
-                            } catch (Exception e){
+                            } catch (Exception e) {
                             }
                         }
                     }
 
-                    if(ignore){
+                    if (ignore) {
                         continue;
                     }
 
                     List<String> updatePayloadList = bulkUpdate.getUpdates();
-    
+
                     boolean isDeleteWrite = false;
                     List<Bson> updates = new ArrayList<>();
-    
-                    for (String payload: updatePayloadList) {
+
+                    for (String payload : updatePayloadList) {
                         Map<String, Object> json = gson.fromJson(payload, Map.class);
                         String operation = (String) json.get("op");
                         if (operation.equalsIgnoreCase("delete")) {
@@ -805,27 +828,27 @@ public class DbAction extends ActionSupport {
                                 for (int i = 0; i < dVal.size(); i++) {
                                     val.add(dVal.get(i).intValue());
                                 }
-                                
+
                                 bson = Updates.setOnInsert(field, val);
                             } else {
-                                bson = Updates.pushEach((String) json.get("field"), (ArrayList) json.get("val"), new PushOptions().slice(-1 * SensitiveSampleData.cap));
-                            }    
+                                bson = Updates.pushEach((String) json.get("field"), (ArrayList) json.get("val"),
+                                        new PushOptions().slice(-1 * SensitiveSampleData.cap));
+                            }
                             updates.add(bson);
                         }
                     }
-    
+
                     if (isDeleteWrite) {
                         writes.add(
-                            new DeleteOneModel<>(filters, new DeleteOptions())
-                        );
+                                new DeleteOneModel<>(filters, new DeleteOptions()));
                     } else {
                         RedactAlert.submitSensitiveSampleDataCall(apiCollectionId);
                         writes.add(
-                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true))
-                        );
+                                new UpdateOneModel<>(filters, Updates.combine(updates),
+                                        new UpdateOptions().upsert(true)));
                     }
                 }
-                if(writes!=null && !writes.isEmpty()){
+                if (writes != null && !writes.isEmpty()) {
                     DbLayer.bulkWriteSensitiveSampleData(writes);
                 }
             } catch (Exception e) {
@@ -844,14 +867,14 @@ public class DbAction extends ActionSupport {
             try {
                 loggerMaker.infoAndAddToDb("bulkWriteTrafficInfo called");
                 ArrayList<WriteModel<TrafficInfo>> writes = new ArrayList<>();
-                for (BulkUpdates bulkUpdate: writesForTrafficInfo) {
+                for (BulkUpdates bulkUpdate : writesForTrafficInfo) {
                     Bson filters = Filters.eq("_id", bulkUpdate.getFilters().get("_id"));
                     List<String> updatePayloadList = bulkUpdate.getUpdates();
-    
-                    List<Bson> updates = new ArrayList<>();                
-                    for (String payload: updatePayloadList) {
+
+                    List<Bson> updates = new ArrayList<>();
+                    for (String payload : updatePayloadList) {
                         Map<String, Object> json = gson.fromJson(payload, Map.class);
-    
+
                         String field = (String) json.get("field");
                         if (field.equals("collectionIds")) {
                             List<Double> dVal = (List) json.get("val");
@@ -862,14 +885,14 @@ public class DbAction extends ActionSupport {
                             updates.add(Updates.setOnInsert(field, val));
                         } else {
                             Double dVal = (Double) json.get("val");
-                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal.intValue() , (String) json.get("op"));
+                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal.intValue(),
+                                    (String) json.get("op"));
                             updates.add(Updates.inc(updatePayload.getField(), (Integer) updatePayload.getVal()));
                         }
                     }
-    
+
                     writes.add(
-                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true))
-                    );
+                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true)));
                 }
                 DbLayer.bulkWriteTrafficInfo(writes);
             } catch (Exception e) {
@@ -888,11 +911,13 @@ public class DbAction extends ActionSupport {
             try {
                 loggerMaker.infoAndAddToDb("bulkWriteTrafficInfo called");
                 ArrayList<WriteModel<TrafficMetrics>> writes = new ArrayList<>();
-                for (BulkUpdates bulkUpdate: writesForTrafficMetrics) {
-                    
+                for (BulkUpdates bulkUpdate : writesForTrafficMetrics) {
+
                     Bson filters = Filters.empty();
                     for (Map.Entry<String, Object> entry : bulkUpdate.getFilters().entrySet()) {
-                        if (entry.getKey().equalsIgnoreCase("_id.bucketStartEpoch") || entry.getKey().equalsIgnoreCase("_id.bucketEndEpoch") || entry.getKey().equalsIgnoreCase("_id.vxlanID")) {
+                        if (entry.getKey().equalsIgnoreCase("_id.bucketStartEpoch")
+                                || entry.getKey().equalsIgnoreCase("_id.bucketEndEpoch")
+                                || entry.getKey().equalsIgnoreCase("_id.vxlanID")) {
                             String valStr = entry.getValue().toString();
                             int val = Integer.valueOf(valStr);
                             filters = Filters.and(filters, Filters.eq(entry.getKey(), val));
@@ -900,21 +925,21 @@ public class DbAction extends ActionSupport {
                             filters = Filters.and(filters, Filters.eq(entry.getKey(), entry.getValue()));
                         }
                     }
-    
-                    //Bson filters = Filters.eq("_id", bulkUpdate.getFilters().get("_id"));
+
+                    // Bson filters = Filters.eq("_id", bulkUpdate.getFilters().get("_id"));
                     List<String> updatePayloadList = bulkUpdate.getUpdates();
-    
-                    List<Bson> updates = new ArrayList<>();                
-                    for (String payload: updatePayloadList) {
+
+                    List<Bson> updates = new ArrayList<>();
+                    for (String payload : updatePayloadList) {
                         Map<String, Object> json = gson.fromJson(payload, Map.class);
                         Double dVal = (Double) json.get("val");
-                        UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal.intValue() , (String) json.get("op"));
+                        UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal.intValue(),
+                                (String) json.get("op"));
                         updates.add(Updates.inc(updatePayload.getField(), (Integer) updatePayload.getVal()));
                     }
-    
+
                     writes.add(
-                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true))
-                    );
+                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true)));
                 }
                 DbLayer.bulkWriteTrafficMetrics(writes);
             } catch (Exception e) {
@@ -932,17 +957,17 @@ public class DbAction extends ActionSupport {
         } else {
             try {
                 ArrayList<WriteModel<SensitiveParamInfo>> writes = new ArrayList<>();
-                for (BulkUpdates bulkUpdate: writesForSensitiveParamInfo) {
+                for (BulkUpdates bulkUpdate : writesForSensitiveParamInfo) {
                     Bson filters = Filters.empty();
                     for (Map.Entry<String, Object> entry : bulkUpdate.getFilters().entrySet()) {
                         filters = Filters.and(filters, Filters.eq(entry.getKey(), entry.getValue()));
                     }
                     List<String> updatePayloadList = bulkUpdate.getUpdates();
-    
+
                     List<Bson> updates = new ArrayList<>();
-                    for (String payload: updatePayloadList) {
+                    for (String payload : updatePayloadList) {
                         Map<String, Object> json = gson.fromJson(payload, Map.class);
-    
+
                         String field = (String) json.get("field");
                         if (field.equals("collectionIds")) {
                             List<Double> dVal = (List) json.get("val");
@@ -953,14 +978,14 @@ public class DbAction extends ActionSupport {
                             updates.add(Updates.setOnInsert(field, val));
                         } else {
                             boolean dVal = (boolean) json.get("val");
-                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal, (String) json.get("op"));
+                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal,
+                                    (String) json.get("op"));
                             updates.add(Updates.set(updatePayload.getField(), dVal));
                         }
                     }
-    
+
                     writes.add(
-                            new UpdateOneModel<>(filters, updates, new UpdateOptions().upsert(true))
-                    );
+                            new UpdateOneModel<>(filters, updates, new UpdateOptions().upsert(true)));
                 }
                 DbLayer.bulkWriteSensitiveParamInfo(writes);
             } catch (Exception e) {
@@ -972,95 +997,101 @@ public class DbAction extends ActionSupport {
     }
 
     public String bulkWriteTestingRunIssues() {
-            try {
-                ArrayList<WriteModel<TestingRunIssues>> writes = new ArrayList<>();
-                for (BulkUpdates bulkUpdate: writesForTestingRunIssues) {
-                    Object filterObj = bulkUpdate.getFilters().get("_id");
-                    HashMap<String, Object> filterMap = (HashMap) filterObj;
-                    HashMap<String, Object> keyMap = (HashMap) filterMap.get("apiInfoKey");
-                    int apiCollectionId = 0;
-                    try {
-                        apiCollectionId = (int)(long) keyMap.get("apiCollectionId");
-                    } catch(Exception f){
-                        apiCollectionId = (int) keyMap.get("apiCollectionId");
-                    }
-                    ApiInfoKey key = new ApiInfoKey(apiCollectionId, (String)keyMap.get("url"), Method.valueOf((String)keyMap.get("method")));
-                    TestingIssuesId idd = new TestingIssuesId(key, TestErrorSource.valueOf((String)filterMap.get("testErrorSource")), (String)filterMap.get("testSubCategory"));
-                    Bson filters = Filters.eq("_id", idd);
-                    List<String> updatePayloadList = bulkUpdate.getUpdates();
-    
-                    List<Bson> updates = new ArrayList<>();
-                    for (String payload: updatePayloadList) {
-                        Map<String, Object> json = gson.fromJson(payload, Map.class);
-    
-                        String field = (String) json.get("field");
-                        if (field.equals(TestingRunIssues.COLLECTION_IDS)) {
-                            List<Double> dVal = (List) json.get("val");
-                            List<Integer> val = new ArrayList<>();
-                            for (int i = 0; i < dVal.size(); i++) {
-                                val.add(dVal.get(i).intValue());
-                            }
-                            updates.add(Updates.setOnInsert(field, val));
-                        }else if(field.equals(TestingRunIssues.LATEST_TESTING_RUN_SUMMARY_HEX_ID)){
-                            String val = (String)json.get("val");
-                            ObjectId id = new ObjectId(val);
-                            updates.add(Updates.set(TestingRunIssues.LATEST_TESTING_RUN_SUMMARY_ID, id));
-                        } else if(field.equals(TestingRunIssues.UNREAD)){
-                            boolean dVal = (boolean) json.get("val");
-                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal, (String) json.get("op"));
-                            updates.add(Updates.set(updatePayload.getField(), dVal));
-                        } else if (field.equals(TestingRunIssues.LAST_UPDATED) ||
-                                field.equals(TestingRunIssues.LAST_SEEN) ||
-                                field.equals(TestingRunIssues.CREATION_TIME)) {
-                            Double val = (double) json.get("val");
-                            int dVal = val.intValue();
-                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal, (String) json.get("op"));
-                            updates.add(Updates.set(updatePayload.getField(), dVal));
-                        } else if (field.equals(TestingRunIssues.KEY_SEVERITY)) {
+        try {
+            ArrayList<WriteModel<TestingRunIssues>> writes = new ArrayList<>();
+            for (BulkUpdates bulkUpdate : writesForTestingRunIssues) {
+                Object filterObj = bulkUpdate.getFilters().get("_id");
+                HashMap<String, Object> filterMap = (HashMap) filterObj;
+                HashMap<String, Object> keyMap = (HashMap) filterMap.get("apiInfoKey");
+                int apiCollectionId = 0;
+                try {
+                    apiCollectionId = (int) (long) keyMap.get("apiCollectionId");
+                } catch (Exception f) {
+                    apiCollectionId = (int) keyMap.get("apiCollectionId");
+                }
+                ApiInfoKey key = new ApiInfoKey(apiCollectionId, (String) keyMap.get("url"),
+                        Method.valueOf((String) keyMap.get("method")));
+                TestingIssuesId idd = new TestingIssuesId(key,
+                        TestErrorSource.valueOf((String) filterMap.get("testErrorSource")),
+                        (String) filterMap.get("testSubCategory"));
+                Bson filters = Filters.eq("_id", idd);
+                List<String> updatePayloadList = bulkUpdate.getUpdates();
 
-                            /*
-                             * Fixing severity temp. here,
-                             * cause the info. from mini-testing always contains HIGH.
-                             * To be fixed in mini-testing.
-                             */
-                            /*
-                             * Severity from info. fixed,
-                             * so taking for dynamic_severity,
-                             * since rest would be same and for old deployments.
-                             */
-                            String testSubCategory = idd.getTestSubCategory();
-                            YamlTemplate template = YamlTemplateDao.instance
-                                    .findOne(Filters.eq(Constants.ID, testSubCategory));
-                            String dVal = (String) json.get("val");
+                List<Bson> updates = new ArrayList<>();
+                for (String payload : updatePayloadList) {
+                    Map<String, Object> json = gson.fromJson(payload, Map.class);
 
-                            if (template != null) {
-                                String severity = template.getInfo().getSeverity();
-                                if (severity != null && !"dynamic_severity".equals(severity)) {
-                                    dVal = severity;
-                                }
-                            }
-
-                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal,
-                                    (String) json.get("op"));
-                            updates.add(Updates.set(updatePayload.getField(), dVal));
-                        } else {
-                            String dVal = (String) json.get("val");
-                            UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal, (String) json.get("op"));
-                            updates.add(Updates.set(updatePayload.getField(), dVal));
+                    String field = (String) json.get("field");
+                    if (field.equals(TestingRunIssues.COLLECTION_IDS)) {
+                        List<Double> dVal = (List) json.get("val");
+                        List<Integer> val = new ArrayList<>();
+                        for (int i = 0; i < dVal.size(); i++) {
+                            val.add(dVal.get(i).intValue());
                         }
+                        updates.add(Updates.setOnInsert(field, val));
+                    } else if (field.equals(TestingRunIssues.LATEST_TESTING_RUN_SUMMARY_HEX_ID)) {
+                        String val = (String) json.get("val");
+                        ObjectId id = new ObjectId(val);
+                        updates.add(Updates.set(TestingRunIssues.LATEST_TESTING_RUN_SUMMARY_ID, id));
+                    } else if (field.equals(TestingRunIssues.UNREAD)) {
+                        boolean dVal = (boolean) json.get("val");
+                        UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal,
+                                (String) json.get("op"));
+                        updates.add(Updates.set(updatePayload.getField(), dVal));
+                    } else if (field.equals(TestingRunIssues.LAST_UPDATED) ||
+                            field.equals(TestingRunIssues.LAST_SEEN) ||
+                            field.equals(TestingRunIssues.CREATION_TIME)) {
+                        Double val = (double) json.get("val");
+                        int dVal = val.intValue();
+                        UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal,
+                                (String) json.get("op"));
+                        updates.add(Updates.set(updatePayload.getField(), dVal));
+                    } else if (field.equals(TestingRunIssues.KEY_SEVERITY)) {
+
+                        /*
+                         * Fixing severity temp. here,
+                         * cause the info. from mini-testing always contains HIGH.
+                         * To be fixed in mini-testing.
+                         */
+                        /*
+                         * Severity from info. fixed,
+                         * so taking for dynamic_severity,
+                         * since rest would be same and for old deployments.
+                         */
+                        String testSubCategory = idd.getTestSubCategory();
+                        YamlTemplate template = YamlTemplateDao.instance
+                                .findOne(Filters.eq(Constants.ID, testSubCategory));
+                        String dVal = (String) json.get("val");
+
+                        if (template != null) {
+                            String severity = template.getInfo().getSeverity();
+                            if (severity != null && !"dynamic_severity".equals(severity)) {
+                                dVal = severity;
+                            }
+                        }
+
+                        UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal,
+                                (String) json.get("op"));
+                        updates.add(Updates.set(updatePayload.getField(), dVal));
+                    } else {
+                        String dVal = (String) json.get("val");
+                        UpdatePayload updatePayload = new UpdatePayload((String) json.get("field"), dVal,
+                                (String) json.get("op"));
+                        updates.add(Updates.set(updatePayload.getField(), dVal));
                     }
-    
-                    writes.add(
-                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true))
-                    );
                 }
-                DbLayer.bulkWriteTestingRunIssues(writes);
-            } catch (Exception e) {
-                loggerMaker.errorAndAddToDb(e, "Error in bulkWriteTestingRunIssues " + e.toString());
-                if (kafkaUtils.isWriteEnabled()) {
-                    kafkaUtils.insertDataSecondary(writesForTestingRunIssues, "bulkWriteTestingRunIssues", Context.accountId.get());
-                }
-                return Action.ERROR.toUpperCase();
+
+                writes.add(
+                        new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true)));
+            }
+            DbLayer.bulkWriteTestingRunIssues(writes);
+        } catch (Exception e) {
+            loggerMaker.errorAndAddToDb(e, "Error in bulkWriteTestingRunIssues " + e.toString());
+            if (kafkaUtils.isWriteEnabled()) {
+                kafkaUtils.insertDataSecondary(writesForTestingRunIssues, "bulkWriteTestingRunIssues",
+                        Context.accountId.get());
+            }
+            return Action.ERROR.toUpperCase();
         }
         return Action.SUCCESS.toUpperCase();
     }
@@ -1069,7 +1100,7 @@ public class DbAction extends ActionSupport {
         try {
             loggerMaker.infoAndAddToDb("bulkWriteOverageInfo called");
             ArrayList<WriteModel<UningestedApiOverage>> writes = new ArrayList<>();
-            for (BulkUpdates bulkUpdate: writesForOverageInfo) {
+            for (BulkUpdates bulkUpdate : writesForOverageInfo) {
                 // Create filter for the document
                 if (bulkUpdate.getFilters().get(UningestedApiOverage.METHOD) instanceof String) {
                     String method = (String) bulkUpdate.getFilters().get(UningestedApiOverage.METHOD);
@@ -1078,16 +1109,18 @@ public class DbAction extends ActionSupport {
                     }
                 }
                 Bson filters = Filters.and(
-                    Filters.eq(UningestedApiOverage.API_COLLECTION_ID, bulkUpdate.getFilters().get(UningestedApiOverage.API_COLLECTION_ID)),
-                    Filters.eq(UningestedApiOverage.URL_TYPE, bulkUpdate.getFilters().get(UningestedApiOverage.URL_TYPE)),
-                    Filters.eq(UningestedApiOverage.METHOD, bulkUpdate.getFilters().get(UningestedApiOverage.METHOD)),
-                    Filters.eq(UningestedApiOverage.URL, bulkUpdate.getFilters().get(UningestedApiOverage.URL))
-                );
+                        Filters.eq(UningestedApiOverage.API_COLLECTION_ID,
+                                bulkUpdate.getFilters().get(UningestedApiOverage.API_COLLECTION_ID)),
+                        Filters.eq(UningestedApiOverage.URL_TYPE,
+                                bulkUpdate.getFilters().get(UningestedApiOverage.URL_TYPE)),
+                        Filters.eq(UningestedApiOverage.METHOD,
+                                bulkUpdate.getFilters().get(UningestedApiOverage.METHOD)),
+                        Filters.eq(UningestedApiOverage.URL, bulkUpdate.getFilters().get(UningestedApiOverage.URL)));
 
                 List<String> updatePayloadList = bulkUpdate.getUpdates();
                 List<Bson> updates = new ArrayList<>();
 
-                for (String payload: updatePayloadList) {
+                for (String payload : updatePayloadList) {
                     Map<String, Object> json = gson.fromJson(payload, Map.class);
                     String field = (String) json.get("field");
                     Object val = json.get("val");
@@ -1102,8 +1135,7 @@ public class DbAction extends ActionSupport {
 
                 if (!updates.isEmpty()) {
                     writes.add(
-                        new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true))
-                    );
+                            new UpdateOneModel<>(filters, Updates.combine(updates), new UpdateOptions().upsert(true)));
                 }
             }
             DbLayer.bulkWriteOverageInfo(writes);
@@ -1121,7 +1153,7 @@ public class DbAction extends ActionSupport {
         return Action.SUCCESS.toUpperCase();
     }
 
-    public String findTestSourceConfig(){
+    public String findTestSourceConfig() {
         try {
             testSourceConfig = DbLayer.findTestSourceConfig(subType);
         } catch (Exception e) {
@@ -1146,14 +1178,16 @@ public class DbAction extends ActionSupport {
         return SingleTypeInfoDao.instance.findAll(filterQ, Projections.exclude(SingleTypeInfo._VALUES));
     }
 
-//    public static List<SingleTypeInfo> fetchStiBasedOnId(ObjectId id) {
-//        // add limit, offset
-//        Bson filters = Filters.gt("_id", id);
-//        Bson sort = Sorts.descending("_id") ;
-//        return SingleTypeInfoDao.instance.findAll(filters, 0, 20000, sort, Projections.exclude(SingleTypeInfo._VALUES));
-//    }
+    // public static List<SingleTypeInfo> fetchStiBasedOnId(ObjectId id) {
+    // // add limit, offset
+    // Bson filters = Filters.gt("_id", id);
+    // Bson sort = Sorts.descending("_id") ;
+    // return SingleTypeInfoDao.instance.findAll(filters, 0, 20000, sort,
+    // Projections.exclude(SingleTypeInfo._VALUES));
+    // }
 
     private String lastStiId = null;
+
     public String fetchStiBasedOnHostHeaders() {
         try {
             ObjectId lastTsObjectId = lastStiId != null ? new ObjectId(lastStiId) : null;
@@ -1198,18 +1232,20 @@ public class DbAction extends ActionSupport {
 
     private static final List<Integer> HIGHER_STI_LIMIT_ACCOUNT_IDS = Arrays.asList(1736798101, 1718042191);
     private static final int STI_LIMIT = 20_000_000;
-    private static final int higherStiLimit = Integer.parseInt(System.getenv().getOrDefault("HIGHER_STI_LIMIT", String.valueOf(STI_LIMIT)));
+    private static final int higherStiLimit = Integer
+            .parseInt(System.getenv().getOrDefault("HIGHER_STI_LIMIT", String.valueOf(STI_LIMIT)));
 
     public String fetchEstimatedDocCount() {
         try {
             count = DbLayer.fetchEstimatedDocCount();
             if (HIGHER_STI_LIMIT_ACCOUNT_IDS.contains(Context.accountId.get())) {
-                // Mini runtime skips traffic processing for more than 20M STIs, 
+                // Mini runtime skips traffic processing for more than 20M STIs,
                 // This will help allowing 20M more STIs to be processed.
-                loggerMaker.infoAndAddToDb("HIGH STI customer fetchEstimatedDocCount:" + count + "subtractedCountSent: " + (count - higherStiLimit));
-                count = count >= STI_LIMIT ? count - higherStiLimit: count;
+                loggerMaker.infoAndAddToDb("HIGH STI customer fetchEstimatedDocCount:" + count + "subtractedCountSent: "
+                        + (count - higherStiLimit));
+                count = count >= STI_LIMIT ? count - higherStiLimit : count;
             }
-        } catch (Exception e){
+        } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "Error in fetchEstimatedDocCount " + e.toString());
         }
         return Action.SUCCESS.toUpperCase();
@@ -1429,8 +1465,8 @@ public class DbAction extends ActionSupport {
     }
 
     private void updateTestingRunApisList(TestingRun testingRun) {
-        if(testingRun != null){
-            if(testingRun.getTestingEndpoints() instanceof CollectionWiseTestingEndpoints){
+        if (testingRun != null) {
+            if (testingRun.getTestingEndpoints() instanceof CollectionWiseTestingEndpoints) {
                 CollectionWiseTestingEndpoints ts = (CollectionWiseTestingEndpoints) testingRun.getTestingEndpoints();
                 CustomTestingEndpoints endpoints = new CustomTestingEndpoints(ts.returnApis());
                 testingRun.setTestingEndpoints(endpoints);
@@ -1505,10 +1541,11 @@ public class DbAction extends ActionSupport {
 
     public String fetchAllApiCollectionsMeta() {
         try {
-           loggerMaker.error("init fetchAllApiCollectionsMeta account id: " + Context.accountId.get());
-           apiCollections = DbLayer.fetchAllApiCollectionsMeta();
+            loggerMaker.error("init fetchAllApiCollectionsMeta account id: " + Context.accountId.get());
+            apiCollections = DbLayer.fetchAllApiCollectionsMeta();
         } catch (Exception e) {
-            loggerMaker.errorAndAddToDb(e, "Error in fetchAllApiCollectionsMeta " + e.toString() + " " + Context.accountId.get());
+            loggerMaker.errorAndAddToDb(e,
+                    "Error in fetchAllApiCollectionsMeta " + e.toString() + " " + Context.accountId.get());
             return Action.ERROR.toUpperCase();
         }
         return Action.SUCCESS.toUpperCase();
@@ -1560,15 +1597,15 @@ public class DbAction extends ActionSupport {
         try {
             Set<TestingIssuesId> ids = new HashSet<>();
             for (Object obj : issuesIds) {
-                HashMap<String,Object> temp = (HashMap) obj;
-                HashMap<String,Object> apiInfoKey = (HashMap) temp.get(TestingIssuesId.API_KEY_INFO);
+                HashMap<String, Object> temp = (HashMap) obj;
+                HashMap<String, Object> apiInfoKey = (HashMap) temp.get(TestingIssuesId.API_KEY_INFO);
                 ApiInfoKey key = new ApiInfoKey(
-                        (int)((long)apiInfoKey.get(ApiInfoKey.API_COLLECTION_ID)),
-                        (String)apiInfoKey.get(ApiInfoKey.URL),
-                        Method.valueOf((String)apiInfoKey.get(ApiInfoKey.METHOD)));
+                        (int) ((long) apiInfoKey.get(ApiInfoKey.API_COLLECTION_ID)),
+                        (String) apiInfoKey.get(ApiInfoKey.URL),
+                        Method.valueOf((String) apiInfoKey.get(ApiInfoKey.METHOD)));
                 TestingIssuesId id = new TestingIssuesId(key,
-                        TestErrorSource.valueOf((String)temp.get(TestingIssuesId.TEST_ERROR_SOURCE)),
-                        (String)temp.get(TestingIssuesId.TEST_SUB_CATEGORY));
+                        TestErrorSource.valueOf((String) temp.get(TestingIssuesId.TEST_ERROR_SOURCE)),
+                        (String) temp.get(TestingIssuesId.TEST_SUB_CATEGORY));
                 ids.add(id);
             }
             testingRunIssues = DbLayer.fetchIssuesByIds(ids);
@@ -1679,7 +1716,7 @@ public class DbAction extends ActionSupport {
         }
         return Action.SUCCESS.toUpperCase();
     }
-    
+
     public String fetchTestRoles() {
         try {
             testRoles = DbLayer.fetchTestRoles();
@@ -1826,7 +1863,8 @@ public class DbAction extends ActionSupport {
 
     public String findStiWithUrlParamFilters() {
         try {
-            sti = DbLayer.findStiWithUrlParamFilters(apiCollectionId, url, methodVal, responseCode, isHeader, param, isUrlParam);
+            sti = DbLayer.findStiWithUrlParamFilters(apiCollectionId, url, methodVal, responseCode, isHeader, param,
+                    isUrlParam);
         } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "Error in findStiWithUrlParamFilters " + e.toString());
             return Action.ERROR.toUpperCase();
@@ -1836,7 +1874,7 @@ public class DbAction extends ActionSupport {
 
     public String insertActivity() {
         try {
-            DbLayer.insertActivity((int) count);  
+            DbLayer.insertActivity((int) count);
         } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "Error in insertActivity " + e.toString());
             return Action.ERROR.toUpperCase();
@@ -1869,7 +1907,6 @@ public class DbAction extends ActionSupport {
 
     public String insertTestingRunResults() {
         try {
-
             Map<String, WorkflowNodeDetails> data = new HashMap<>();
             try {
                 if (this.testingRunResult != null && this.testingRunResult.get("workflowTest") != null) {
@@ -1884,23 +1921,26 @@ public class DbAction extends ActionSupport {
                     }
                 }
             } catch (Exception e) {
-                loggerMaker.errorAndAddToDb(e, "Error in insertTestingRunResults mapNodeIdToWorkflowNodeDetails" + e.toString());
+                loggerMaker.errorAndAddToDb(e,
+                        "Error in insertTestingRunResults mapNodeIdToWorkflowNodeDetails" + e.toString());
                 e.printStackTrace();
             }
-            TestingRunResult testingRunResult = objectMapper.readValue(this.testingRunResult.toJson(), TestingRunResult.class);
+            TestingRunResult testingRunResult = objectMapper.readValue(this.testingRunResult.toJson(),
+                    TestingRunResult.class);
 
             try {
                 if (!data.isEmpty()) {
                     testingRunResult.getWorkflowTest().setMapNodeIdToWorkflowNodeDetails(data);
                 }
             } catch (Exception e) {
-                loggerMaker.errorAndAddToDb(e, "Error in insertTestingRunResults mapNodeIdToWorkflowNodeDetails2" + e.toString());
+                loggerMaker.errorAndAddToDb(e,
+                        "Error in insertTestingRunResults mapNodeIdToWorkflowNodeDetails2" + e.toString());
                 e.printStackTrace();
             }
 
-            if(testingRunResult.getSingleTestResults()!=null){
+            if (testingRunResult.getSingleTestResults() != null) {
                 testingRunResult.setTestResults(new ArrayList<>(testingRunResult.getSingleTestResults()));
-            }else if(testingRunResult.getMultiExecTestResults() !=null){
+            } else if (testingRunResult.getMultiExecTestResults() != null) {
                 testingRunResult.setTestResults(new ArrayList<>(testingRunResult.getMultiExecTestResults()));
             }
 
@@ -1912,6 +1952,45 @@ public class DbAction extends ActionSupport {
             if (testingRunResult.getTestRunResultSummaryHexId() != null) {
                 ObjectId id = new ObjectId(testingRunResult.getTestRunResultSummaryHexId());
                 testingRunResult.setTestRunResultSummaryId(id);
+            }
+
+            try {
+                Map<String, Integer> apiErrors = new HashMap<>();
+                int cloudflareErrors = 0;
+                int rateLimit429 = 0;
+                int server5xx = 0;
+                try {
+                    List<GenericTestResult> trs = testingRunResult.getTestResults();
+                    if (trs != null && !trs.isEmpty()) {
+                        GenericTestResult last = trs.get(trs.size() - 1);
+                        String message = null;
+                        try {
+                            if (last instanceof TestResult) {
+                                message = ((TestResult) last).getMessage();
+                            } else if (last instanceof MultiExecTestResult) {
+                                message = ((MultiExecTestResult) last).getMessage();
+                            }
+                        } catch (Exception ig) {
+                        }
+                        if (message != null) {
+                            if (Pattern.compile(REGEX_CLOUDFLARE, Pattern.CASE_INSENSITIVE).matcher(message).find()) {
+                                cloudflareErrors = 1;
+                            }
+                            if (Pattern.compile(REGEX_429).matcher(message).find()) {
+                                rateLimit429 = 1;
+                            }
+                            if (Pattern.compile(REGEX_5XX).matcher(message).find()) {
+                                server5xx = 1;
+                            }
+                        }
+                    }
+                } catch (Exception ig) {
+                }
+                apiErrors.put("cloudflare", cloudflareErrors);
+                apiErrors.put("429", rateLimit429);
+                apiErrors.put("5xx", server5xx);
+                testingRunResult.setApiErrors(apiErrors);
+            } catch (Exception ig) {
             }
 
             DbLayer.insertTestingRunResults(testingRunResult);
@@ -1927,7 +2006,7 @@ public class DbAction extends ActionSupport {
 
     public String insertWorkflowTestResult() {
         try {
-            DbLayer.insertWorkflowTestResult(workflowTestResult);        
+            DbLayer.insertWorkflowTestResult(workflowTestResult);
         } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "Error in insertWorkflowTestResult " + e.toString());
             if (kafkaUtils.isWriteEnabled()) {
@@ -1951,7 +2030,7 @@ public class DbAction extends ActionSupport {
 
     public String updateAccessMatrixInfo() {
         try {
-            DbLayer.updateAccessMatrixInfo(taskId, frequencyInSeconds);        
+            DbLayer.updateAccessMatrixInfo(taskId, frequencyInSeconds);
         } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "Error in updateAccessMatrixInfo " + e.toString());
             return Action.ERROR.toUpperCase();
@@ -1975,10 +2054,10 @@ public class DbAction extends ActionSupport {
             if (summaryId != null) {
                 summaryObjectId = new ObjectId(summaryId);
             }
-            if((operator == null || operator.isEmpty()) && summaryId != null){
+            if ((operator == null || operator.isEmpty()) && summaryId != null) {
                 totalCountIssues = TestExecutor.calcTotalCountIssues(summaryObjectId);
                 trrs = DbLayer.updateIssueCountInSummary(summaryId, totalCountIssues);
-            }else{
+            } else {
                 trrs = DbLayer.updateIssueCountInSummary(summaryId, totalCountIssues, operator);
             }
             if (trrs != null && trrs.getTestingRunId() != null) {
@@ -2205,7 +2284,7 @@ public class DbAction extends ActionSupport {
         return Action.SUCCESS.toUpperCase();
     }
 
-    public String fetchActiveAdvancedFilters(){
+    public String fetchActiveAdvancedFilters() {
         try {
             this.activeAdvancedFilters = DbLayer.fetchActiveFilterTemplates();
         } catch (Exception e) {
@@ -2224,7 +2303,7 @@ public class DbAction extends ActionSupport {
         return Action.SUCCESS.toUpperCase();
     }
 
-    public String fetchStatusOfTests(){
+    public String fetchStatusOfTests() {
         try {
             this.currentlyRunningTests = DbLayer.fetchStatusOfTests();
         } catch (Exception e) {
@@ -2253,7 +2332,8 @@ public class DbAction extends ActionSupport {
         try {
             int timeNow = Context.now();
             sendSlack(trrs, totalCountIssues, Context.accountId.get());
-            loggerMaker.infoAndAddToDb("Slack alert sent successfully for trrs " + trrs.getId() + " accountId " + Context.accountId.get() + " time taken " + (Context.now() - timeNow));
+            loggerMaker.infoAndAddToDb("Slack alert sent successfully for trrs " + trrs.getId() + " accountId "
+                    + Context.accountId.get() + " time taken " + (Context.now() - timeNow));
         } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "error in sending slack alert for testing" + e);
         }
@@ -2273,14 +2353,16 @@ public class DbAction extends ActionSupport {
         String summaryId = trrs.getHexId();
 
         int totalApis = trrs.getTotalApis();
-        String testType =  TestingRun.findTestType(testingRun,trrs);
+        String testType = TestingRun.findTestType(testingRun, trrs);
         int countIssues = totalCountIssues.values().stream().mapToInt(Integer::intValue).sum();
-        long nextTestRun = testingRun.getPeriodInSeconds() == 0 ? 0 : ((long) testingRun.getScheduleTimestamp() + (long) testingRun.getPeriodInSeconds());
+        long nextTestRun = testingRun.getPeriodInSeconds() == 0 ? 0
+                : ((long) testingRun.getScheduleTimestamp() + (long) testingRun.getPeriodInSeconds());
         long scanTimeInSeconds = Math.abs(Context.now() - trrs.getStartTimestamp());
 
         String collectionName = null;
         TestingEndpoints testingEndpoints = testingRun.getTestingEndpoints();
-        if(testingEndpoints != null && testingEndpoints.getType() != null && testingEndpoints.getType().equals(TestingEndpoints.Type.COLLECTION_WISE)) {
+        if (testingEndpoints != null && testingEndpoints.getType() != null
+                && testingEndpoints.getType().equals(TestingEndpoints.Type.COLLECTION_WISE)) {
             CollectionWiseTestingEndpoints collectionWiseTestingEndpoints = (CollectionWiseTestingEndpoints) testingEndpoints;
             int apiCollectionId = collectionWiseTestingEndpoints.getApiCollectionId();
             ApiCollection apiCollection = DbLayer.fetchApiCollectionMeta(apiCollectionId);
@@ -2290,39 +2372,41 @@ public class DbAction extends ActionSupport {
         int newIssues = 0;
         List<TestingRunIssues> testingRunIssuesList = DbLayer.fetchOpenIssues(summaryId);
         Map<String, Integer> apisAffectedCount = new HashMap<>();
-        for (TestingRunIssues testingRunIssues: testingRunIssuesList) {
+        for (TestingRunIssues testingRunIssues : testingRunIssuesList) {
             String testSubCategory = testingRunIssues.getId().getTestSubCategory();
-            int totalApisAffected = apisAffectedCount.getOrDefault(testSubCategory, 0)+1;
+            int totalApisAffected = apisAffectedCount.getOrDefault(testSubCategory, 0) + 1;
             apisAffectedCount.put(testSubCategory, totalApisAffected);
-            if(testingRunIssues.getCreationTime() > trrs.getStartTimestamp()) newIssues++;
+            if (testingRunIssues.getCreationTime() > trrs.getStartTimestamp())
+                newIssues++;
         }
 
         testingRunIssuesList.sort(Comparator.comparing(TestingRunIssues::getSeverity));
 
         List<NewIssuesModel> newIssuesModelList = new ArrayList<>();
-        for(TestingRunIssues testingRunIssues : testingRunIssuesList) {
-            if(testingRunIssues.getCreationTime() > trrs.getStartTimestamp()) {
+        for (TestingRunIssues testingRunIssues : testingRunIssuesList) {
+            if (testingRunIssues.getCreationTime() > trrs.getStartTimestamp()) {
                 String testRunResultId;
-                if(newIssuesModelList.size() <= 5) {
+                if (newIssuesModelList.size() <= 5) {
                     Bson filterForRunResult = Filters.and(
-                            Filters.eq(TestingRunResult.TEST_RUN_RESULT_SUMMARY_ID, testingRunIssues.getLatestTestingRunSummaryId()),
+                            Filters.eq(TestingRunResult.TEST_RUN_RESULT_SUMMARY_ID,
+                                    testingRunIssues.getLatestTestingRunSummaryId()),
                             Filters.eq(TestingRunResult.TEST_SUB_TYPE, testingRunIssues.getId().getTestSubCategory()),
-                            Filters.eq(TestingRunResult.API_INFO_KEY, testingRunIssues.getId().getApiInfoKey())
-                    );
+                            Filters.eq(TestingRunResult.API_INFO_KEY, testingRunIssues.getId().getApiInfoKey()));
                     TestingRunResult testingRunResult = DbLayer.fetchTestingRunResults(filterForRunResult);
                     testRunResultId = testingRunResult.getHexId();
-                } else testRunResultId = "";
+                } else
+                    testRunResultId = "";
 
                 String issueCategory = testingRunIssues.getId().getTestSubCategory();
                 newIssuesModelList.add(new NewIssuesModel(
                         issueCategory,
                         testRunResultId,
                         apisAffectedCount.get(issueCategory),
-                        testingRunIssues.getCreationTime()
-                ));
+                        testingRunIssues.getCreationTime()));
             }
         }
-        loggerMaker.infoAndAddToDb("Build slack payload successfully for trrs " + trrs.getId() + " slack channel id " + testingRun.getSelectedSlackChannelId());
+        loggerMaker.infoAndAddToDb("Build slack payload successfully for trrs " + trrs.getId() + " slack channel id "
+                + testingRun.getSelectedSlackChannelId());
         SlackAlerts apiTestStatusAlert = new APITestStatusAlert(
                 testingRun.getName(),
                 totalCountIssues.getOrDefault(GlobalEnums.Severity.CRITICAL.name(), 0),
@@ -2338,8 +2422,7 @@ public class DbAction extends ActionSupport {
                 nextTestRun,
                 newIssuesModelList,
                 testingRun.getHexId(),
-                summaryId
-        );
+                summaryId);
         SlackSender.sendAlert(accountId, apiTestStatusAlert, testingRun.getSelectedSlackChannelId());
     }
 
@@ -2347,8 +2430,8 @@ public class DbAction extends ActionSupport {
     private static AtomicInteger tagMissCount = new AtomicInteger(0);
 
     private List<CollectionTags> checkTagsNeedUpdates(List<CollectionTags> tags, int apiCollectionId) {
-        
-        if(tags == null || tags.isEmpty()){
+
+        if (tags == null || tags.isEmpty()) {
             return null;
         }
 
@@ -2367,7 +2450,7 @@ public class DbAction extends ActionSupport {
         if (ParamFilter.isNewEntry(Context.accountId.get(), apiCollectionId, "", "", singleTagString)) {
             tagMissCount.incrementAndGet();
             loggerMaker.info("New tags found for apiCollectionId: " + apiCollectionId
-                + " accountId: " + Context.accountId.get() + " Bloom filter tagMissCount: " + tagMissCount.get());
+                    + " accountId: " + Context.accountId.get() + " Bloom filter tagMissCount: " + tagMissCount.get());
             return tags;
         }
 
@@ -2470,7 +2553,7 @@ public class DbAction extends ActionSupport {
 
     public String fetchNodesForCollectionIds() {
         try {
-            nodes = DbLayer.fetchNodesForCollectionIds(apiCollectionIds,removeZeroLevel, skip);
+            nodes = DbLayer.fetchNodesForCollectionIds(apiCollectionIds, removeZeroLevel, skip);
         } catch (Exception e) {
             loggerMaker.errorAndAddToDb(e, "Error in fetchNodesForCollectionIds " + e.toString());
             return Action.ERROR.toUpperCase();
@@ -2487,7 +2570,7 @@ public class DbAction extends ActionSupport {
 
         try {
             List<ApiHitCountInfo> apiHitCountInfos = new ArrayList<>();
-            for (BasicDBObject obj: apiHitCountInfoList) {
+            for (BasicDBObject obj : apiHitCountInfoList) {
                 ApiHitCountInfo apiHitCountInfo = objectMapper.readValue(obj.toJson(), ApiHitCountInfo.class);
                 apiHitCountInfos.add(apiHitCountInfo);
             }
@@ -2521,7 +2604,7 @@ public class DbAction extends ActionSupport {
     }
 
     String reqMethod;
-    
+
     public String getReqMethod() {
         return reqMethod;
     }
@@ -2533,7 +2616,7 @@ public class DbAction extends ActionSupport {
     public String findDependencyNodes() {
         try {
             dependencyNodes = DbLayer.findDependencyNodes(apiCollectionId, url, methodVal, reqMethod);
-        } catch(Exception e){
+        } catch (Exception e) {
             e.printStackTrace();
         }
         return Action.SUCCESS.toUpperCase();
@@ -2551,6 +2634,7 @@ public class DbAction extends ActionSupport {
 
     List<String> testSuiteId;
     List<String> testSuiteTestSubCategories;
+
     public String findTestSubCategoriesByTestSuiteId() {
         try {
             testSuiteTestSubCategories = DbLayer.findTestSubCategoriesByTestSuiteId(testSuiteId);
@@ -2561,7 +2645,7 @@ public class DbAction extends ActionSupport {
         return Action.SUCCESS.toUpperCase();
     }
 
-    public String getCurrentTestingRunDetailsFromEditor(){
+    public String getCurrentTestingRunDetailsFromEditor() {
         try {
             testingRunPlayground = DbLayer.getCurrentTestingRunDetailsFromEditor(this.ts);
         } catch (Exception e) {
@@ -2570,7 +2654,6 @@ public class DbAction extends ActionSupport {
         }
         return Action.SUCCESS.toUpperCase();
     }
-
 
     public List<SvcToSvcGraphEdge> svcToSvcGraphEdges;
     public List<SvcToSvcGraphNode> svcToSvcGraphNodes;
@@ -2620,7 +2703,7 @@ public class DbAction extends ActionSupport {
         return Action.SUCCESS.toUpperCase();
     }
 
-    public String updateTestingRunPlaygroundStateAndResult(){
+    public String updateTestingRunPlaygroundStateAndResult() {
         try {
             switch (this.getTestingRunPlaygroundType()) {
                 case TEST_EDITOR_PLAYGROUND:
@@ -2638,13 +2721,16 @@ public class DbAction extends ActionSupport {
                             }
                         }
                     } catch (Exception e) {
-                        loggerMaker.errorAndAddToDb(e, "Error in insertTestingRunResults in testingRunPlayground mapNodeIdToWorkflowNodeDetails" + e.toString());
+                        loggerMaker.errorAndAddToDb(e,
+                                "Error in insertTestingRunResults in testingRunPlayground mapNodeIdToWorkflowNodeDetails"
+                                        + e.toString());
                         e.printStackTrace();
                     }
-                    TestingRunResult testingRunResult = objectMapper.readValue(this.testingRunResult.toJson(), TestingRunResult.class);
-                    if(testingRunResult.getSingleTestResults()!=null){
+                    TestingRunResult testingRunResult = objectMapper.readValue(this.testingRunResult.toJson(),
+                            TestingRunResult.class);
+                    if (testingRunResult.getSingleTestResults() != null) {
                         testingRunResult.setTestResults(new ArrayList<>(testingRunResult.getSingleTestResults()));
-                    }else if(testingRunResult.getMultiExecTestResults() !=null){
+                    } else if (testingRunResult.getMultiExecTestResults() != null) {
                         testingRunResult.setTestResults(new ArrayList<>(testingRunResult.getMultiExecTestResults()));
                     }
 
@@ -2653,14 +2739,17 @@ public class DbAction extends ActionSupport {
                             testingRunResult.getWorkflowTest().setMapNodeIdToWorkflowNodeDetails(data);
                         }
                     } catch (Exception e) {
-                        loggerMaker.errorAndAddToDb(e, "Error in insertTestingRunResults testingRunPlayground mapNodeIdToWorkflowNodeDetails2" + e.toString());
+                        loggerMaker.errorAndAddToDb(e,
+                                "Error in insertTestingRunResults testingRunPlayground mapNodeIdToWorkflowNodeDetails2"
+                                        + e.toString());
                         e.printStackTrace();
                     }
                     DbLayer.updateTestingRunPlayground(new ObjectId(this.testingRunPlaygroundId), testingRunResult);
                     break;
                 case POSTMAN_IMPORTS:
                     if (this.getOriginalHttpResponse() != null) {
-                        DbLayer.updateTestingRunPlayground(new ObjectId(this.testingRunPlaygroundId), this.getOriginalHttpResponse());
+                        DbLayer.updateTestingRunPlayground(new ObjectId(this.testingRunPlaygroundId),
+                                this.getOriginalHttpResponse());
                     }
             }
         } catch (Exception e) {
@@ -2692,8 +2781,6 @@ public class DbAction extends ActionSupport {
         }
         return Action.SUCCESS.toUpperCase();
     }
-
-
 
     public String insertMCPAuditDataLog() {
         try {
@@ -2852,7 +2939,7 @@ public class DbAction extends ActionSupport {
 
     public List<BulkUpdates> getWritesForSampleData() {
         return writesForSampleData;
-        
+
     }
 
     public void setWritesForSampleData(List<BulkUpdates> writesForSampleData) {
@@ -3098,7 +3185,6 @@ public class DbAction extends ActionSupport {
     public void setLogicalGroupName(String logicalGroupName) {
         this.logicalGroupName = logicalGroupName;
     }
-
 
     public String getTestingRunResultSummaryId() {
         return testingRunResultSummaryId;
@@ -3644,7 +3730,6 @@ public class DbAction extends ActionSupport {
         this.vpcId = vpcId;
     }
 
-
     public int getDeltaPeriodValue() {
         return deltaPeriodValue;
     }
@@ -3768,12 +3853,15 @@ public class DbAction extends ActionSupport {
     public List<SvcToSvcGraphEdge> getSvcToSvcGraphEdges() {
         return svcToSvcGraphEdges;
     }
+
     public void setSvcToSvcGraphEdges(List<SvcToSvcGraphEdge> svcToSvcGraphEdges) {
         this.svcToSvcGraphEdges = svcToSvcGraphEdges;
     }
+
     public List<SvcToSvcGraphNode> getSvcToSvcGraphNodes() {
         return svcToSvcGraphNodes;
     }
+
     public void setSvcToSvcGraphNodes(List<SvcToSvcGraphNode> svcToSvcGraphNodes) {
         this.svcToSvcGraphNodes = svcToSvcGraphNodes;
     }
